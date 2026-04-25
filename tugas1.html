@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<meta charset="UTF-8">
+<html>
+<head>
+<title>Textures and glmatrix - Tugas 1</title>
+<style>
+    body {
+        background-color: #EEEEEE;
+    }
+</style>
+
+<script src="gl-matrix.js"></script>
+
+<script>
+
+"use strict";
+
+// =============================================================
+// 1. SHADER PROGRAMS
+// =============================================================
+
+// 1.1 Vertex Shader
+// Menerima koordinat vertex, texture coords, dan normal.
+// Menghasilkan v_color dari arah cahaya terhadap normal,
+// serta v_texCoords untuk sampling di fragment shader.
+const vertexShaderSource = `
+    attribute vec3 a_coords;
+    attribute vec2 a_texCoords;
+    uniform mat4 u_transformMatrix;
+    uniform mat3 u_normalMatrix;
+    uniform vec3 u_normal;
+    uniform vec3 u_diffuse;
+    varying vec4 v_color;
+    varying vec2 v_texCoords;
+    void main() {
+        vec3 N = normalize( u_normalMatrix * u_normal );
+        v_color = vec4( abs(N.z) * u_diffuse, 1.0 );
+        v_texCoords = a_texCoords;
+        vec4 coords4 = vec4(a_coords, 1.0);
+        gl_Position = u_transformMatrix * coords4;
+    }`;
+
+// 1.2 Fragment Shader
+// Mengambil warna dari texture dan mengalikannya dengan v_color (pencahayaan).
+const fragmentShaderSource = `
+    precision mediump float;
+    varying vec4 v_color;
+    varying vec2 v_texCoords;
+    uniform sampler2D u_sampler;
+    void main() {
+        vec4 texColor = texture2D( u_sampler, v_texCoords );
+        gl_FragColor = v_color * texColor;
+    }`;
+
+
+// =============================================================
+// 2. VARIABEL GLOBAL
+// =============================================================
+
+// 2.1 WebGL context dan lokasi uniform
+let gl;
+let uTransformMatrixLoc;
+let uNormalMatrixLoc;
+let uNormalLoc;
+
+// 2.2 Matriks transformasi
+const projection    = mat4.create();
+const modelview     = mat4.create();
+const modelviewProj = mat4.create();
+const normalMatrix  = mat3.create();
+
+// 2.3 Variabel rotasi (diubah via keyboard)
+let rotateX = 0;
+let rotateY = 0;
+let rotateZ = 0;
+
+// 2.4 Definisi 6 face kubus
+// Setiap face memiliki:
+//   - textureURL : file gambar yang digunakan
+//   - normal     : vektor normal menghadap keluar dari face
+//   - vertices   : 4 sudut face dalam urutan counter-clockwise (TRIANGLE_FAN)
+//   - transform  : fungsi yang menerapkan rotasi modelview agar face menghadap arah yang benar
+//
+// Konvensi koordinat kubus satuan (side = 2, dari -1 ke +1):
+//   front  (+Z) : z =  1
+//   back   (-Z) : z = -1
+//   right  (+X) : x =  1
+//   left   (-X) : x = -1
+//   top    (+Y) : y =  1
+//   bottom (-Y) : y = -1
+
+const cubeFaces = [
+    {
+        // 2.4.1 Front face (+Z) -- posz.jpg
+        label: "front",
+        textureURL: "park/posz.jpg",
+        normal: [0, 0, 1],
+        vertices: new Float32Array([
+            -1, -1,  1,
+             1, -1,  1,
+             1,  1,  1,
+            -1,  1,  1
+        ])
+    },
+    {
+        // 2.4.2 Back face (-Z) -- negz.jpg
+        // Vertex dibalik agar face menghadap keluar (normal -Z)
+        label: "back",
+        textureURL: "park/negz.jpg",
+        normal: [0, 0, -1],
+        vertices: new Float32Array([
+             1, -1, -1,
+            -1, -1, -1,
+            -1,  1, -1,
+             1,  1, -1
+        ])
+    },
+    {
+        // 2.4.3 Right face (+X) -- posx.jpg
+        label: "right",
+        textureURL: "park/posx.jpg",
+        normal: [1, 0, 0],
+        vertices: new Float32Array([
+             1, -1, -1,
+             1, -1,  1,
+             1,  1,  1,
+             1,  1, -1
+        ])
+    },
+    {
+        // 2.4.4 Left face (-X) -- negx.jpg
+        label: "left",
+        textureURL: "park/negx.jpg",
+        normal: [-1, 0, 0],
+        vertices: new Float32Array([
+            -1, -1,  1,
+            -1, -1, -1,
+            -1,  1, -1,
+            -1,  1,  1
+        ])
+    },
+    {
+        // 2.4.5 Top face (+Y) -- posy.jpg
+        label: "top",
+        textureURL: "park/posy.jpg",
+        normal: [0, 1, 0],
+        vertices: new Float32Array([
+            -1,  1,  1,
+             1,  1,  1,
+             1,  1, -1,
+            -1,  1, -1
+        ])
+    },
+    {
+        // 2.4.6 Bottom face (-Y) -- negy.jpg
+        label: "bottom",
+        textureURL: "park/negy.jpg",
+        normal: [0, -1, 0],
+        vertices: new Float32Array([
+            -1, -1, -1,
+             1, -1, -1,
+             1, -1,  1,
+            -1, -1,  1
+        ])
+    }
+];
+
+// 2.5 Array texture objects (diisi setelah semua gambar dimuat)
+let textureObjects = [];
+let loadedCount = 0;
+
+// 2.6 Buffer vertices dan buffer per-face
+let coordsBuf;
+let aTexCoordsLoc;
+let tCoordsBuf;
+
+
+// =============================================================
+// 3. FUNGSI DRAW
+// =============================================================
+
+// 3.1 Fungsi utama draw -- dipanggil setiap kali rotasi berubah atau tekstur selesai dimuat
+function draw() {
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    // 3.1.1 Bangun ulang modelview dari rotasi saat ini
+    mat4.lookAt(modelview, [0, 0, 5], [0, 0, 0], [0, 1, 0]);
+    mat4.rotateX(modelview, modelview, rotateX);
+    mat4.rotateY(modelview, modelview, rotateY);
+    mat4.rotateZ(modelview, modelview, rotateZ);
+
+    // 3.1.2 Simpan modelview dasar sebelum menggambar tiap face
+    let baseMV = mat4.clone(modelview);
+
+    // 3.1.3 Gambar keenam face
+    for (let i = 0; i < cubeFaces.length; i++) {
+        // Kembalikan modelview ke kondisi dasar sebelum tiap face
+        mat4.copy(modelview, baseMV);
+        drawFace(cubeFaces[i], textureObjects[i]);
+    }
+}
+
+// 3.2 Fungsi drawFace -- menggambar satu face kubus dengan texture dan normal yang sesuai
+function drawFace(face, texObj) {
+    // 3.2.1 Upload vertex koordinat face ini ke GPU
+    gl.bindBuffer(gl.ARRAY_BUFFER, coordsBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, face.vertices, gl.STATIC_DRAW);
+
+    // 3.2.2 Kirim normal vector face ini ke shader
+    gl.uniform3fv(uNormalLoc, face.normal);
+
+    // 3.2.3 Hitung dan kirim matriks transformasi gabungan (projection * modelview)
+    mat4.multiply(modelviewProj, projection, modelview);
+    gl.uniformMatrix4fv(uTransformMatrixLoc, false, modelviewProj);
+
+    // 3.2.4 Hitung dan kirim normal matrix (derivasi dari modelview)
+    mat3.normalFromMat4(normalMatrix, modelview);
+    gl.uniformMatrix3fv(uNormalMatrixLoc, false, normalMatrix);
+
+    // 3.2.5 Bind texture yang sesuai untuk face ini
+    gl.bindTexture(gl.TEXTURE_2D, texObj);
+
+    // 3.2.6 Gambar face sebagai TRIANGLE_FAN dari 4 vertex
+    gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
+}
+
+
+// =============================================================
+// 4. INISIALISASI WEBGL
+// =============================================================
+
+// 4.1 Kompilasi shader, setup buffer, dan mulai muat semua tekstur
+function initGL() {
+    let prog = createProgram(gl, vertexShaderSource, fragmentShaderSource);
+    gl.useProgram(prog);
+
+    // 4.1.1 Setup buffer koordinat vertex (akan diisi ulang tiap face di drawFace)
+    let aCoordsLoc = gl.getAttribLocation(prog, "a_coords");
+    coordsBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, coordsBuf);
+    gl.vertexAttribPointer(aCoordsLoc, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aCoordsLoc);
+
+    // 4.1.2 Setup buffer texture coordinates (sama untuk semua face: 0,0 → 1,0 → 1,1 → 0,1)
+    aTexCoordsLoc = gl.getAttribLocation(prog, "a_texCoords");
+    tCoordsBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, tCoordsBuf);
+    let tCoords = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
+    gl.bufferData(gl.ARRAY_BUFFER, tCoords, gl.STATIC_DRAW);
+    gl.vertexAttribPointer(aTexCoordsLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(aTexCoordsLoc);
+
+    // 4.1.3 Lokasi uniform
+    uTransformMatrixLoc = gl.getUniformLocation(prog, "u_transformMatrix");
+    uNormalMatrixLoc    = gl.getUniformLocation(prog, "u_normalMatrix");
+    uNormalLoc          = gl.getUniformLocation(prog, "u_normal");
+    let uDiffuseLoc     = gl.getUniformLocation(prog, "u_diffuse");
+    gl.uniform3f(uDiffuseLoc, 1, 1, 1);
+
+    // 4.1.4 Aktifkan depth test agar face terdekat menutupi face di belakangnya
+    gl.enable(gl.DEPTH_TEST);
+
+    // 4.1.5 Setup proyeksi perspektif
+    // FOV lebih lebar (PI/4) agar semua sisi kubus terlihat saat dirotasi
+    mat4.perspective(projection, Math.PI / 4, 1, 1, 20);
+
+    // 4.1.6 Flip Y agar koordinat texture sesuai dengan orientasi gambar
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, 1);
+
+    // 4.2 Muat semua 6 tekstur secara asinkron
+    loadAllTextures();
+}
+
+// 4.2 Muat semua tekstur; draw() dipanggil hanya setelah semua selesai dimuat
+function loadAllTextures() {
+    for (let i = 0; i < cubeFaces.length; i++) {
+        loadTexture(i);
+    }
+}
+
+// 4.2.1 Muat satu tekstur berdasarkan index face
+function loadTexture(index) {
+    let img = new Image();
+    img.onload = function () {
+        textureObjects[index] = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, textureObjects[index]);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        gl.generateMipmap(gl.TEXTURE_2D);
+
+        loadedCount++;
+        updateLoadingStatus();
+
+        // Gambar hanya setelah semua 6 tekstur selesai dimuat
+        if (loadedCount === cubeFaces.length) {
+            draw();
+        }
+    };
+    img.onerror = function () {
+        console.error("Gagal memuat tekstur:", cubeFaces[index].textureURL);
+    };
+    img.src = cubeFaces[index].textureURL;
+}
+
+// 4.2.2 Update pesan status loading di halaman
+function updateLoadingStatus() {
+    let msg = document.getElementById("message");
+    if (loadedCount < cubeFaces.length) {
+        msg.textContent = "Memuat tekstur... (" + loadedCount + "/" + cubeFaces.length + ")";
+    } else {
+        msg.innerHTML =
+            "Gunakan tombol panah, PageUp, dan PageDown untuk merotasi kubus.<br>" +
+            "Tekan Home atau Enter untuk kembali ke posisi awal.";
+    }
+}
+
+
+// =============================================================
+// 5. UTILITAS WEBGL
+// =============================================================
+
+// 5.1 Kompilasi dan link vertex shader + fragment shader menjadi satu program
+function createProgram(gl, vShader, fShader) {
+    let vsh = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vsh, vShader);
+    gl.compileShader(vsh);
+    if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
+        throw new Error("Error in vertex shader: " + gl.getShaderInfoLog(vsh));
+    }
+
+    let fsh = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fsh, fShader);
+    gl.compileShader(fsh);
+    if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
+        throw new Error("Error in fragment shader: " + gl.getShaderInfoLog(fsh));
+    }
+
+    let prog = gl.createProgram();
+    gl.attachShader(prog, vsh);
+    gl.attachShader(prog, fsh);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        throw new Error("Link error in program: " + gl.getProgramInfoLog(prog));
+    }
+    return prog;
+}
+
+
+// =============================================================
+// 6. INPUT HANDLER
+// =============================================================
+
+// 6.1 Keyboard handler -- mengatur rotasi kubus
+function doKey(evt) {
+    let rotationChanged = true;
+    switch (evt.keyCode) {
+        case 37: rotateY -= 0.05; break;  // panah kiri
+        case 39: rotateY += 0.05; break;  // panah kanan
+        case 38: rotateX -= 0.05; break;  // panah atas
+        case 40: rotateX += 0.05; break;  // panah bawah
+        case 33: rotateZ += 0.05; break;  // PageUp
+        case 34: rotateZ -= 0.05; break;  // PageDown
+        case 13:                           // Enter
+        case 36: rotateX = rotateY = rotateZ = 0; break;  // Home
+        default: rotationChanged = false;
+    }
+    if (rotationChanged) {
+        evt.preventDefault();
+        draw();
+    }
+}
+
+
+// =============================================================
+// 7. INISIALISASI HALAMAN
+// =============================================================
+
+// 7.1 Entry point -- dipanggil setelah halaman selesai dimuat
+function init() {
+    try {
+        let canvas = document.getElementById("webglcanvas");
+        gl = canvas.getContext("webgl");
+        if (!gl) {
+            throw "Browser tidak mendukung WebGL";
+        }
+    } catch (e) {
+        document.getElementById("canvas-holder").innerHTML =
+            "<p>Maaf, tidak dapat mendapatkan WebGL graphics context.</p>";
+        return;
+    }
+
+    try {
+        initGL();
+    } catch (e) {
+        document.getElementById("canvas-holder").innerHTML =
+            "<p>Maaf, gagal menginisialisasi WebGL: " + e.message + "</p>";
+        return;
+    }
+
+    document.addEventListener("keydown", doKey, false);
+}
+
+window.onload = init;
+
+</script>
+</head>
+<body>
+
+<h2>Texture Mapping pada Keenam Sisi Kubus</h2>
+
+<p id="message">Memuat tekstur... (0/6)</p>
+
+<noscript><hr><h3>Halaman ini membutuhkan Javascript dan browser yang mendukung WebGL</h3><hr></noscript>
+
+<div id="canvas-holder">
+    <canvas width=600 height=600 id="webglcanvas" style="background-color:black"></canvas>
+</div>
+
+</body>
+</html>
