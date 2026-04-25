@@ -6,10 +6,26 @@
 <style>
     body {
         background-color: #EEEEEE;
+        font-family: sans-serif;
+    }
+    #controls {
+        margin: 10px 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    #controls button {
+        padding: 6px 10px;
+        border: 1px solid #bbb;
+        background: #fff;
+        cursor: pointer;
+    }
+    #controls button:hover {
+        background: #f3f3f3;
     }
 </style>
 
-<script src="gl-matrix.js"></script>
+<script src="gl-matrix_2.js"></script>
 
 <script>
 
@@ -74,6 +90,10 @@ let rotateX = 0;
 let rotateY = 0;
 let rotateZ = 0;
 
+let isDragging = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
+
 // 2.4 Definisi 6 face kubus
 // Setiap face memiliki:
 //   - textureURL : file gambar yang digunakan
@@ -93,6 +113,7 @@ const cubeFaces = [
     {
         // 2.4.1 Front face (+Z) -- posz.jpg
         label: "front",
+        direction: "+Z",
         textureURL: "park/posz.jpg",
         normal: [0, 0, 1],
         vertices: new Float32Array([
@@ -100,12 +121,14 @@ const cubeFaces = [
              1, -1,  1,
              1,  1,  1,
             -1,  1,  1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     },
     {
         // 2.4.2 Back face (-Z) -- negz.jpg
         // Vertex dibalik agar face menghadap keluar (normal -Z)
         label: "back",
+        direction: "-Z",
         textureURL: "park/negz.jpg",
         normal: [0, 0, -1],
         vertices: new Float32Array([
@@ -113,11 +136,13 @@ const cubeFaces = [
             -1, -1, -1,
             -1,  1, -1,
              1,  1, -1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     },
     {
         // 2.4.3 Right face (+X) -- posx.jpg
         label: "right",
+        direction: "+X",
         textureURL: "park/posx.jpg",
         normal: [1, 0, 0],
         vertices: new Float32Array([
@@ -125,11 +150,13 @@ const cubeFaces = [
              1, -1,  1,
              1,  1,  1,
              1,  1, -1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     },
     {
         // 2.4.4 Left face (-X) -- negx.jpg
         label: "left",
+        direction: "-X",
         textureURL: "park/negx.jpg",
         normal: [-1, 0, 0],
         vertices: new Float32Array([
@@ -137,11 +164,13 @@ const cubeFaces = [
             -1, -1, -1,
             -1,  1, -1,
             -1,  1,  1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     },
     {
         // 2.4.5 Top face (+Y) -- posy.jpg
         label: "top",
+        direction: "+Y",
         textureURL: "park/posy.jpg",
         normal: [0, 1, 0],
         vertices: new Float32Array([
@@ -149,11 +178,13 @@ const cubeFaces = [
              1,  1,  1,
              1,  1, -1,
             -1,  1, -1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     },
     {
         // 2.4.6 Bottom face (-Y) -- negy.jpg
         label: "bottom",
+        direction: "-Y",
         textureURL: "park/negy.jpg",
         normal: [0, -1, 0],
         vertices: new Float32Array([
@@ -161,7 +192,8 @@ const cubeFaces = [
              1, -1, -1,
              1, -1,  1,
             -1, -1,  1
-        ])
+        ]),
+        texCoords: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1])
     }
 ];
 
@@ -181,6 +213,10 @@ let tCoordsBuf;
 
 // 3.1 Fungsi utama draw -- dipanggil setiap kali rotasi berubah atau tekstur selesai dimuat
 function draw() {
+    if (loadedCount < cubeFaces.length) {
+        return;
+    }
+
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
@@ -218,10 +254,14 @@ function drawFace(face, texObj) {
     mat3.normalFromMat4(normalMatrix, modelview);
     gl.uniformMatrix3fv(uNormalMatrixLoc, false, normalMatrix);
 
-    // 3.2.5 Bind texture yang sesuai untuk face ini
+    // 3.2.5 Upload texture coordinates untuk face ini
+    gl.bindBuffer(gl.ARRAY_BUFFER, tCoordsBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, face.texCoords, gl.STATIC_DRAW);
+
+    // 3.2.6 Bind texture yang sesuai untuk face ini
     gl.bindTexture(gl.TEXTURE_2D, texObj);
 
-    // 3.2.6 Gambar face sebagai TRIANGLE_FAN dari 4 vertex
+    // 3.2.7 Gambar face sebagai TRIANGLE_FAN dari 4 vertex
     gl.drawArrays(gl.TRIANGLE_FAN, 0, 4);
 }
 
@@ -242,12 +282,10 @@ function initGL() {
     gl.vertexAttribPointer(aCoordsLoc, 3, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(aCoordsLoc);
 
-    // 4.1.2 Setup buffer texture coordinates (sama untuk semua face: 0,0 → 1,0 → 1,1 → 0,1)
+    // 4.1.2 Setup buffer texture coordinates (diisi per-face saat drawFace)
     aTexCoordsLoc = gl.getAttribLocation(prog, "a_texCoords");
     tCoordsBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, tCoordsBuf);
-    let tCoords = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
-    gl.bufferData(gl.ARRAY_BUFFER, tCoords, gl.STATIC_DRAW);
     gl.vertexAttribPointer(aTexCoordsLoc, 2, gl.FLOAT, false, 0, 0);
     gl.enableVertexAttribArray(aTexCoordsLoc);
 
@@ -286,7 +324,7 @@ function loadTexture(index) {
         textureObjects[index] = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, textureObjects[index]);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-        gl.generateMipmap(gl.TEXTURE_2D);
+        setupTextureFiltering(img.width, img.height);
 
         loadedCount++;
         updateLoadingStatus();
@@ -302,6 +340,23 @@ function loadTexture(index) {
     img.src = cubeFaces[index].textureURL;
 }
 
+function isPowerOfTwo(value) {
+    return (value & (value - 1)) === 0;
+}
+
+function setupTextureFiltering(width, height) {
+    if (isPowerOfTwo(width) && isPowerOfTwo(height)) {
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    } else {
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    }
+}
+
 // 4.2.2 Update pesan status loading di halaman
 function updateLoadingStatus() {
     let msg = document.getElementById("message");
@@ -309,7 +364,7 @@ function updateLoadingStatus() {
         msg.textContent = "Memuat tekstur... (" + loadedCount + "/" + cubeFaces.length + ")";
     } else {
         msg.innerHTML =
-            "Gunakan tombol panah, PageUp, dan PageDown untuk merotasi kubus.<br>" +
+            "Gunakan drag mouse atau tombol panah, PageUp, dan PageDown untuk merotasi kubus.<br>" +
             "Tekan Home atau Enter untuk kembali ke posisi awal.";
     }
 }
@@ -370,6 +425,74 @@ function doKey(evt) {
     }
 }
 
+function setViewPreset(direction) {
+    rotateZ = 0;
+    switch (direction) {
+        case "front":
+            rotateX = 0;
+            rotateY = 0;
+            break;
+        case "back":
+            rotateX = 0;
+            rotateY = Math.PI;
+            break;
+        case "right":
+            rotateX = 0;
+            rotateY = Math.PI / 2;
+            break;
+        case "left":
+            rotateX = 0;
+            rotateY = -Math.PI / 2;
+            break;
+        case "top":
+            rotateX = -Math.PI / 2;
+            rotateY = 0;
+            break;
+        case "bottom":
+            rotateX = Math.PI / 2;
+            rotateY = 0;
+            break;
+        default:
+            rotateX = 0;
+            rotateY = 0;
+            rotateZ = 0;
+    }
+    draw();
+}
+
+function setupMouseControls(canvas) {
+    canvas.addEventListener("mousedown", function (evt) {
+        isDragging = true;
+        lastMouseX = evt.clientX;
+        lastMouseY = evt.clientY;
+    });
+
+    canvas.addEventListener("mousemove", function (evt) {
+        if (!isDragging) {
+            return;
+        }
+
+        let dx = evt.clientX - lastMouseX;
+        let dy = evt.clientY - lastMouseY;
+
+        rotateY += dx * 0.01;
+        rotateX += dy * 0.01;
+
+        lastMouseX = evt.clientX;
+        lastMouseY = evt.clientY;
+
+        draw();
+    });
+
+    canvas.addEventListener("mouseup", function () {
+        isDragging = false;
+    });
+
+    canvas.addEventListener("mouseleave", function () {
+        isDragging = false;
+    });
+}
+
 
 // =============================================================
 // 7. INISIALISASI HALAMAN
@@ -398,6 +521,15 @@ function init() {
     }
 
     document.addEventListener("keydown", doKey, false);
+    setupMouseControls(document.getElementById("webglcanvas"));
+
+    document.getElementById("btn-front").addEventListener("click", function () { setViewPreset("front"); });
+    document.getElementById("btn-back").addEventListener("click", function () { setViewPreset("back"); });
+    document.getElementById("btn-right").addEventListener("click", function () { setViewPreset("right"); });
+    document.getElementById("btn-left").addEventListener("click", function () { setViewPreset("left"); });
+    document.getElementById("btn-top").addEventListener("click", function () { setViewPreset("top"); });
+    document.getElementById("btn-bottom").addEventListener("click", function () { setViewPreset("bottom"); });
+    document.getElementById("btn-reset").addEventListener("click", function () { setViewPreset("reset"); });
 }
 
 window.onload = init;
@@ -409,6 +541,16 @@ window.onload = init;
 <h2>Texture Mapping pada Keenam Sisi Kubus</h2>
 
 <p id="message">Memuat tekstur... (0/6)</p>
+
+<div id="controls">
+    <button id="btn-front" type="button">Depan (+Z)</button>
+    <button id="btn-back" type="button">Belakang (-Z)</button>
+    <button id="btn-right" type="button">Kanan (+X)</button>
+    <button id="btn-left" type="button">Kiri (-X)</button>
+    <button id="btn-top" type="button">Atas (+Y)</button>
+    <button id="btn-bottom" type="button">Bawah (-Y)</button>
+    <button id="btn-reset" type="button">Reset</button>
+</div>
 
 <noscript><hr><h3>Halaman ini membutuhkan Javascript dan browser yang mendukung WebGL</h3><hr></noscript>
 
